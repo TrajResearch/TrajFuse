@@ -1,5 +1,6 @@
 #!/usr/bin/python
 import os
+os.environ['NUMEXPR_MAX_THREADS'] = '128'
 import argparse
 import numpy as np
 import torch
@@ -23,9 +24,9 @@ from metrics_simple import cal_pre_recall_with_f1
 train:
     python train.py
 test:
-    python train.py --test-only --resume=/home/sjj/liyantao/TrajFuse/checkpoints/best_model_1e4.pt
+    python train.py --test-only --resume=/home/sjj/liyantao/TrajFuse/checkpoints/best_model.pt
 
-python /home/sjj/liyantao/TrajFuse_代码/train.py --test-only --resume=/home/sjj/liyantao/TrajFuse/checkpoints/best_model_1e4.pt
+python /home/sjj/liyantao/TrajFuse_代码/train.py --test-only --resume=/home/sjj/liyantao/TrajFuse/checkpoints/best_model.pt
 '''
 
 # 设置日志
@@ -127,9 +128,12 @@ def safe_backward_and_step(loss, model, optimizer, grad_clip, logger):
             logger.error("损失无效，跳过当前批次")
             return False
         
+
         # 反向传播
         loss.backward()
         
+
+
         # 检查梯度
         total_norm = 0
         param_count = 0
@@ -292,7 +296,8 @@ def train_epoch(model, train_loader, optimizer, criterion, device, epoch, writer
                 target=target_seg_data,
                 **kwargs
             )
-            
+
+
             # 获取损失
             loss = loss_dict['total_loss']
             
@@ -410,7 +415,7 @@ def validate(model, val_loader, criterion, device, logger):
                 # 提取基本数据
                 gps_data = batch['gps_data'].to(device) if batch['gps_data'] is not None else None
                 cdr_data = batch['cdr_data'].to(device) if batch['cdr_data'] is not None else None
-                road_seg_data = batch['road_seg_data'].to(device) if batch['road_seg_data'] is not None else None
+                #road_seg_data = batch['road_seg_data'].to(device) if batch['road_seg_data'] is not None else None
                 road_seg_data = batch['road_gps_data'].to(device) if batch['road_gps_data'] is not None else None
 
                 target_seg_data = batch['target_seg_data'].to(device)
@@ -485,16 +490,20 @@ def validate(model, val_loader, criterion, device, logger):
                 successful_batches += 1
                 
                 # 计算预测结果
-                _, pred_indices = torch.max(pred_segments, dim=-1)
-                
-                # 检查预测的有效性
-                if pred_indices.max() >= road_network_size:
-                    logger.warning(f"批次 {batch_idx} 预测ID超出范围，进行裁剪")
-                    pred_indices = torch.clamp(pred_indices, 0, road_network_size-1)
-                
-                # 收集预测和目标
-                all_preds_list.extend(pred_indices.cpu().numpy().tolist())
-                all_targets_list.extend(target_seg_data.cpu().numpy().tolist())
+                if pred_segments is not None:
+                    _, pred_indices = torch.max(pred_segments, dim=-1)
+                    
+                    # 检查预测的有效性
+                    if pred_indices.max() >= road_network_size:
+                        logger.warning(f"批次 {batch_idx} 预测ID超出范围，进行裁剪")
+                        pred_indices = torch.clamp(pred_indices, 0, road_network_size-1)
+                    
+                    # 收集预测和目标
+                    all_preds_list.extend(pred_indices.cpu().numpy().tolist())
+                    all_targets_list.extend(target_seg_data.cpu().numpy().tolist())
+                else:
+                    all_preds_list  = None
+                    all_targets_list  = None
                 
                 
             except Exception as e:
@@ -654,7 +663,7 @@ def calculate_model_generation_metrics(model, data_loader, device, logger, eos_t
                 # 提取基本数据
                 gps_data = batch['gps_data'].to(device) if batch['gps_data'] is not None else None
                 cdr_data = batch['cdr_data'].to(device) if batch['cdr_data'] is not None else None
-                road_seg_data = batch['road_seg_data'].to(device) if batch['road_seg_data'] is not None else None
+                #road_seg_data = batch['road_seg_data'].to(device) if batch['road_seg_data'] is not None else None
                 road_seg_data = batch['road_gps_data'].to(device) if batch['road_gps_data'] is not None else None
                 
 
@@ -715,16 +724,20 @@ def calculate_model_generation_metrics(model, data_loader, device, logger, eos_t
                     continue
                 
                 # 计算预测结果
-                _, pred_indices = torch.max(pred_segments, dim=-1)
-                
-                # 检查预测的有效性
-                if pred_indices.max() >= road_network_size:
-                    logger.warning(f"生成指标批次 {batch_idx} 预测ID超出范围，进行裁剪")
-                    pred_indices = torch.clamp(pred_indices, 0, road_network_size-1)
+                if pred_segments is not None:
+                    _, pred_indices = torch.max(pred_segments, dim=-1)
+                    
+                    # 检查预测的有效性
+                    if pred_indices.max() >= road_network_size:
+                        logger.warning(f"生成指标批次 {batch_idx} 预测ID超出范围，进行裁剪")
+                        pred_indices = torch.clamp(pred_indices, 0, road_network_size-1)
 
-                # 收集生成序列和目标序列
-                all_generated_sequences.extend(pred_indices.cpu().numpy().tolist())
-                all_target_sequences.extend(target_seg_data.cpu().numpy().tolist())
+                    # 收集生成序列和目标序列
+                    all_generated_sequences.extend(pred_indices.cpu().numpy().tolist())
+                    all_target_sequences.extend(target_seg_data.cpu().numpy().tolist())
+                else:
+                    all_generated_sequences = None 
+                    all_target_sequences = None
                 successful_batches += 1
                 
             except Exception as e:
@@ -756,7 +769,8 @@ def calculate_model_generation_metrics(model, data_loader, device, logger, eos_t
         except Exception as e:
             logger.error(f"生成指标计算失败: {e}")
     else:
-        logger.warning("模型生成指标计算数据不足")
+        logger.warning("模型生成任务已屏蔽,跳过生成指标计算.")
+
     
     return generation_metrics
 
@@ -823,19 +837,22 @@ def test(model, test_loader, device, logger, save_dir=None, eos_token_id=-1):
                 if not validate_tensor(pred_segments, "pred_segments", logger):
                     failed_batches += 1
                     continue
-                
-                # 计算预测结果
-                _, pred_indices = torch.max(pred_segments, dim=-1)
+                if pred_segments is not None:
+                    # 计算预测结果
+                    _, pred_indices = torch.max(pred_segments, dim=-1)
 
-                # 检查预测范围
-                road_network_size = road_network.x.size(0)
-                if pred_indices.max() >= road_network_size:
-                    logger.warning(f"测试批次 {batch_idx} 预测ID超出范围，进行裁剪")
-                    pred_indices = torch.clamp(pred_indices, 0, road_network_size-1)
-                
-                # 收集预测和目标
-                all_preds_list.extend(pred_indices.cpu().numpy().tolist())
-                all_targets_list.extend(target_seg_data.cpu().numpy().tolist())
+                    # 检查预测范围
+                    road_network_size = road_network.x.size(0)
+                    if pred_indices.max() >= road_network_size:
+                        logger.warning(f"测试批次 {batch_idx} 预测ID超出范围，进行裁剪")
+                        pred_indices = torch.clamp(pred_indices, 0, road_network_size-1)
+                    
+                    # 收集预测和目标
+                    all_preds_list.extend(pred_indices.cpu().numpy().tolist())
+                    all_targets_list.extend(target_seg_data.cpu().numpy().tolist())
+                else:
+                    all_preds_list  = None
+                    all_targets_list  = None
 
 
                 successful_batches += 1
@@ -910,7 +927,7 @@ def main():
     
     
     # 数据参数
-    parser.add_argument('--data-path', type=str, default="/root/autodl-tmp/data/chengdu/chengdu_train_extension65_50_35_road2gps.pkl", help='Path to the data file')
+    parser.add_argument('--data-path', type=str, default="/root/autodl-tmp/data/chengdu_train_extension65_50_35_road2gps_gps150.pkl", help='Path to the data file')
     parser.add_argument('--route-min-len', type=int, default=5, help='Minimum length of route segments')
     parser.add_argument('--route-max-len', type=int, default=256, help='Maximum length of route segments100')
     parser.add_argument('--gps-min-len', type=int, default=10, help='Minimum length of GPS trajectory')
@@ -934,7 +951,7 @@ def main():
     parser.add_argument('--mlm-replace-prob', type=float, default=0.8, help='MLM替换概率')
     parser.add_argument('--mlm-random-prob', type=float, default=0.1, help='MLM随机替换概率')
     parser.add_argument('--main-loss-weight', type=float, default=1.0, help='Weight for main task loss')
-    parser.add_argument('--contrastive-loss-weight', type=float, default=0.5, help='Weight for contrastive loss 0.5')  #new 对比学习损失权重
+    parser.add_argument('--contrastive-loss-weight', type=float, default=1.0, help='Weight for contrastive loss 0.5')  #new 对比学习损失权重
     parser.add_argument('--contrastive-temperature', type=float, default=0.1, help='Temperature for contrastive loss 0.1')  #new 对比学习温度参数
 
 
@@ -951,9 +968,9 @@ def main():
     parser.add_argument('--seed', type=int, default=2023, help='Random seed')
     parser.add_argument('--strict-deterministic', action='store_true', 
                         help='启用严格确定性模式：单线程 + 严格CUDA确定性 (可能影响性能但确保完全一致的结果)')
-    parser.add_argument('--save-dir', type=str, default='/root/TrajFuse_代码/checkpoints', help='Directory to save models')
-    parser.add_argument('--log-dir', type=str, default='/root/TrajFuse_代码/logs', help='Directory to save logs')
-    parser.add_argument('--resume', type=str, default='/root/TrajFuse/checkpoints/best_model_1e4.pt', help='Path to checkpoint to resume from')
+    parser.add_argument('--save-dir', type=str, default='/root/TrajFuse_代码/checkpoints/消融7.8/只留第二层对比学习', help='Directory to save models')
+    parser.add_argument('--log-dir', type=str, default='/root/TrajFuse_代码/checkpoints/消融7.8/只留第二层对比学习', help='Directory to save logs')
+    parser.add_argument('--resume', type=str, default=None, help='Path to checkpoint to resume from')
     parser.add_argument('--test-only', action='store_true', help='Only run testing')
     parser.add_argument('--eval-only', action='store_true', help='Only load model and test eval data loading (for debugging eval data issues)')
     parser.add_argument('--quiet', action='store_true', help='Reduce verbosity of logging')
@@ -1050,7 +1067,7 @@ def main():
     writer = SummaryWriter(log_dir=args.log_dir)
     
     # 设置设备
-    device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+    device = torch.device('cuda:4' if torch.cuda.is_available() else 'cpu')
     logger.info(f'Using device: {device}')
     
     # 加载数据
@@ -1248,7 +1265,7 @@ def main():
         logger.info('注意：将使用新初始化的模型参数，不加载已保存的模型')
         
         # 设置eval数据路径
-        eval_data_path = "/root/autodl-tmp/data/chengdu/chengdu_eval_extension65_50_35_road2gps.pkl"
+        eval_data_path = "/root/autodl-tmp/data/chengdu_eval_extension65_50_35_road2gps_gps150.pkl"
         logger.info(f'EVAL诊断模式：尝试加载eval数据集: {eval_data_path}')
         
         # 检查数据文件是否存在
@@ -1491,7 +1508,7 @@ def main():
             logger.info('仅运行测试...')
             
             # 加载独立的测试数据集
-            test_only_data_path = "/root/autodl-tmp/data/chengdu/chengdu_eval_extension65_50_35_road2gps.pkl"
+            test_only_data_path = "/root/autodl-tmp/data/chengdu_eval_extension65_50_35_road2gps_gps150.pkl"
             logger.info(f'测试模式：加载独立测试数据集: {test_only_data_path}')
             
             try:
@@ -1641,7 +1658,7 @@ def main():
             train_generation_metrics = {}
             try:
                 logger.info(f'Epoch {epoch}: 计算训练集模型生成指标...')
-                train_generation_metrics = calculate_model_generation_metrics(model, train_loader, device, logger, eos_token_id=-1)
+                #train_generation_metrics = calculate_model_generation_metrics(model, train_loader, device, logger, eos_token_id=-1)
                 logger.info(f'Epoch {epoch} 训练集生成指标: rid_acc={train_generation_metrics.get("rid_acc", 0.0):.4f}, '
                            f'rid_recall={train_generation_metrics.get("rid_recall", 0.0):.4f}, '
                            f'rid_precision={train_generation_metrics.get("rid_precision", 0.0):.4f}, '
@@ -1654,7 +1671,7 @@ def main():
             test_generation_metrics = {}
             try:
                 logger.info(f'Epoch {epoch}: 计算测试集模型生成指标...')
-                test_generation_metrics = calculate_model_generation_metrics(model, test_loader, device, logger, eos_token_id=-1)
+                #test_generation_metrics = calculate_model_generation_metrics(model, test_loader, device, logger, eos_token_id=-1)
                 logger.info(f'Epoch {epoch} 测试集生成指标: rid_acc={test_generation_metrics.get("rid_acc", 0.0):.4f}, '
                            f'rid_recall={test_generation_metrics.get("rid_recall", 0.0):.4f}, '
                            f'rid_precision={test_generation_metrics.get("rid_precision", 0.0):.4f}, '
@@ -1793,7 +1810,7 @@ def main():
             logger.error(f"加载最佳模型失败: {e}")
     
     # 加载独立的测试数据集
-    final_test_data_path = "/root/autodl-tmp/data/chengdu/chengdu_eval_extension65_50_35_road2gps.pkl"
+    final_test_data_path = "/root/autodl-tmp/data/chengdu_eval_extension65_50_35_road2gps_gps150.pkl"
     logger.info(f'加载独立测试数据集: {final_test_data_path}')
     
     try:

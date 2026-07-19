@@ -34,6 +34,7 @@ from model.TrajFuse import TrajFuse
 from dataloader import get_trifusion_loaders
 from metrics_simple import cal_pre_recall_with_f1
 from eval_utils import next_batch_index,label_norm,MLPReg,pred_unnorm
+from eval_utils import DestinationPredictor as DP
 from task.similarity_eval_new import search_and_evaluate
 
 
@@ -266,8 +267,10 @@ def get_seq_emb_from_traj_TrajFuse_time(model, eval_data, logger, batch_size=64)
                     if gps_data is not None:
                         time_positions['gps']=gps_time_data
                         #屏蔽时间信息
-                        gps_time_embedding=model.time_encoder(gps_time_data)    
+                        gps_time_embedding=model.time_encoder(gps_time_data)  
+
                         gps_time_embedding = torch.zeros_like(gps_time_embedding)   
+
      
                         gps_embedding,_,gps_traj_rep = model.gps_encoder(gps_data,gps_time_embedding,~gps_data_padding,model.share_input_projection,model.share_output_projection)            
                         gps_embedding = model._safe_tensor_operation(gps_embedding, "GPS编码")
@@ -280,7 +283,9 @@ def get_seq_emb_from_traj_TrajFuse_time(model, eval_data, logger, batch_size=64)
                         time_positions['cdr']=cdr_time_data
 
                         cdr_time_embedding=model.time_encoder(cdr_time_data)
-                        cdr_time_embedding = torch.zeros_like(cdr_time_embedding)     
+
+                        cdr_time_embedding = torch.zeros_like(cdr_time_embedding)   
+
 
                         cdr_embedding,_,cdr_traj_rep = model.cdr_encoder(cdr_data,cdr_time_embedding,~cdr_data_padding,model.share_input_projection,model.share_output_projection)
                         cdr_embedding = model._safe_tensor_operation(cdr_embedding, "CDR编码")
@@ -292,7 +297,7 @@ def get_seq_emb_from_traj_TrajFuse_time(model, eval_data, logger, batch_size=64)
                         time_positions['road_seg']=road_time_data
 
                         road_time_embedding=model.time_encoder(road_time_data) 
-                        road_time_embedding = torch.zeros_like(road_time_embedding)       
+                        road_time_embedding = torch.zeros_like(road_time_embedding)      
 
                         road_seg_embedding,_,road_seg_rep = model.road_segment_encoder(road_seg_data,road_time_embedding,~road_data_padding,model.share_input_projection,model.share_output_projection)
                         road_seg_embedding = model._safe_tensor_operation(road_seg_embedding, "GPS编码")
@@ -481,7 +486,6 @@ def get_seq_emb_from_traj_TrajFuse_retrieval(model, eval_data, logger,disturbanc
 
 
     return gps_embedding_all,cdr_embedding_all,road_seg_embedding_all,gps_query_embedding_all,gps_truth_embedding_all
-
 
 class EvalDataLoader:
     """评估数据加载器"""
@@ -744,7 +748,7 @@ class EvalRunner:
         self.logger.info("=" * 50)
         self.logger.info(f"模型{self.model_name}开始相似度检索评估 - 查询类型: {query_type}")
 
-        if query_type not in ['gps_query_road','gps_query_gps']:
+        if query_type not in ['gps_query_road','cdr_query_road','gps_query_cdr','gps_query_gps']:
             self.logger.error(f"不支持的查询类型: {query_type}")
             return None
         disturbance=False
@@ -814,11 +818,13 @@ class EvalRunner:
 
             D_embedding = torch.cat((truth_embedding, other_data_gps_embedding), dim=0)
 
+
             self.logger.info("特征提取完成。")
 
             # 转换为numpy数组并归一化
             query_features = F.normalize(query_embedding.cpu(), dim=1).numpy()  
             D_features = F.normalize(D_embedding.cpu(), dim=1).numpy()  
+            
 
                 
             self.logger.info(f"查询特征维度: {query_features.shape}")  
@@ -844,6 +850,96 @@ class EvalRunner:
 
             self.logger.info("跨源GPS查询Road评估完成。")
 
+        elif query_type == 'gps_query_cdr' :
+            self.logger.info("开始跨源GPS查询CDR评估...")
+            # 特征提取
+            query_embedding = gps_embedding[:nums//5] 
+            truth_embedding = cdr_embedding[:nums//5]
+            other_data_gps_embedding = cdr_embedding[nums//5:]
+
+            matches = np.where(np.all(query_embedding.cpu().numpy() == query_embedding.cpu().numpy()[0], axis=1))[0]
+            self.logger.info(f"查询0在查询库中的出现次数: {len(matches)}")
+            self.logger.info(f"匹配索引列表: {matches.tolist()}")
+
+            D_embedding = torch.cat((truth_embedding, other_data_gps_embedding), dim=0)
+
+
+            self.logger.info("特征提取完成。")
+
+            # 转换为numpy数组并归一化
+            query_features = F.normalize(query_embedding.cpu(), dim=1).numpy()  
+            D_features = F.normalize(D_embedding.cpu(), dim=1).numpy()  
+            
+
+                
+            self.logger.info(f"查询特征维度: {query_features.shape}")  
+            self.logger.info(f"数据库特征维度: {D_features.shape}")  
+
+
+            # 构建索引
+            query_indices = np.arange(len(query_features))
+
+
+            metrics=search_and_evaluate(query_features, D_features, query_indices)
+
+
+            # 输出JSON格式结果
+            self.logger.info(json.dumps({
+                "query_type": query_type,
+                "status": "success",
+                "metrics": metrics,
+                "feature_dim": query_features.shape[1],
+                "index_type": "IVFFlat",
+                "normalization": "L2"
+            }, indent=2))
+
+            self.logger.info("跨源GPS查询CDR评估完成。")
+
+        elif query_type == 'cdr_query_road' :
+            self.logger.info("开始跨源CDR查询Road评估...")
+            # 特征提取
+            query_embedding = cdr_embedding[:nums//5] 
+            truth_embedding = road_seg_embedding[:nums//5]
+            other_data_gps_embedding = road_seg_embedding[nums//5:]
+
+            matches = np.where(np.all(query_embedding.cpu().numpy() == query_embedding.cpu().numpy()[0], axis=1))[0]
+            self.logger.info(f"查询0在查询库中的出现次数: {len(matches)}")
+            self.logger.info(f"匹配索引列表: {matches.tolist()}")
+
+            D_embedding = torch.cat((truth_embedding, other_data_gps_embedding), dim=0)
+
+
+            self.logger.info("特征提取完成。")
+
+            # 转换为numpy数组并归一化
+            query_features = F.normalize(query_embedding.cpu(), dim=1).numpy()  
+            D_features = F.normalize(D_embedding.cpu(), dim=1).numpy()  
+            
+
+                
+            self.logger.info(f"查询特征维度: {query_features.shape}")  
+            self.logger.info(f"数据库特征维度: {D_features.shape}")  
+
+
+            # 构建索引
+            query_indices = np.arange(len(query_features))
+
+
+            metrics=search_and_evaluate(query_features, D_features, query_indices)
+
+
+            # 输出JSON格式结果
+            self.logger.info(json.dumps({
+                "query_type": query_type,
+                "status": "success",
+                "metrics": metrics,
+                "feature_dim": query_features.shape[1],
+                "index_type": "IVFFlat",
+                "normalization": "L2"
+            }, indent=2))
+
+            self.logger.info("跨源CDR查询Road评估完成。")
+
         else:
             self.logger.error(f"不支持的查询类型: {query_type}")
             self.logger.error(f"请补充该查询类型")
@@ -854,8 +950,8 @@ def main():
     """主函数"""
     parser = argparse.ArgumentParser(description='综合评估运行器')
     parser.add_argument('--model-name', type=str, default='TrajFuse', choices=['TrajFuse', 'ConDTC', 'GREEN', 'START', 'JGRM','TrajMamba','TrajCL','Word2Vec','Node2Vec'], help='模型名称')
-    parser.add_argument('--model-path', type=str, default='/root/TrajFuse/checkpoints/best_model_1e4.pt', help='模型文件路径')
-    parser.add_argument('--data-path', type=str, default='/root/autodl-tmp/data/chengdu/chengdu_eval_extension65_50_35_road2gps.pkl', help='测试数据路径')
+    parser.add_argument('--model-path', type=str, default='/root/TrajFuse_代码/checkpoints/消融7.8/只留第二层对比学习/best_model.pt', help='模型文件路径')
+    parser.add_argument('--data-path', type=str, default='/root/autodl-tmp/data/chengdu_eval_extension65_50_35_road2gps_gps150.pkl', help='测试数据路径')
     parser.add_argument('--log-dir', type=str, default='/root/TrajFuse_代码/eval_logs', help='评测日志目录')
     parser.add_argument('--task', type=str, default='all', 
                        choices=[ 'time', 'retrieval','all'],
@@ -875,10 +971,14 @@ def main():
     elif args.task == 'retrieval':
         results = runner.evaluate_similarity_retrieval('gps_query_gps')
         results = runner.evaluate_similarity_retrieval('gps_query_road')
+
     else:
         results = runner.evaluate_travel_time_estimation()
         results = runner.evaluate_similarity_retrieval('gps_query_gps')
-        results = runner.evaluate_similarity_retrieval('gps_query_road')        
+        results = runner.evaluate_similarity_retrieval('gps_query_road')    
+        results = runner.evaluate_similarity_retrieval('gps_query_cdr')
+        results = runner.evaluate_similarity_retrieval('cdr_query_road')
+        
     
 
 if __name__ == '__main__':

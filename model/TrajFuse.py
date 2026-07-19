@@ -59,7 +59,7 @@ class TrajFuse(nn.Module):
         self.mlm_random_prob = mlm_random_prob
         
         # 创建确定性随机数生成器
-        self.deterministic_generator = torch.Generator(device='cuda:0')
+        self.deterministic_generator = torch.Generator(device='cuda:4')
         self.deterministic_generator.manual_seed(deterministic_seed)
         
         # 保存标准化参数
@@ -153,16 +153,16 @@ class TrajFuse(nn.Module):
         # GPS、Road和CDR序列编码器
         self.gps_encoder = SequentialEncoder(
             input_dim=2, d_model=d_model, nhead=nhead, 
-            num_layers=num_encoder_layers, dropout=dropout
+            num_layers=num_encoder_layers, dropout=dropout,fourier_mapping_size = d_model
         )
         
         self.cdr_encoder = SequentialEncoder(
             input_dim=2, d_model=d_model, nhead=nhead,
-            num_layers=num_encoder_layers, dropout=dropout
+            num_layers=num_encoder_layers, dropout=dropout,fourier_mapping_size = d_model
         )
         self.road_segment_encoder = SequentialEncoder(
             input_dim=2, d_model=d_model, nhead=nhead,
-            num_layers=num_encoder_layers, dropout=dropout
+            num_layers=num_encoder_layers, dropout=dropout,fourier_mapping_size = d_model
         )
         
 
@@ -297,15 +297,12 @@ class TrajFuse(nn.Module):
         try:
             # GPS序列编码 + MLM
             if gps_data is not None:
-                
-                # 创建MLM掩码
-                masked_gps_data, original_gps_data, masked_gps_time_data, original_gps_time_data, gps_mask = self._create_mlm_mask(gps_data, gps_time_data, "GPS", gps_data_padding)
-               
+                            
                 # GPS编码 + 时间编码
                 time_positions['gps']=gps_time_data
                 gps_time_embedding = self.time_encoder(gps_time_data)
 
-                gps_embedding,gps_mlm_embedding,gps_traj_rep=self.gps_encoder(masked_gps_data,gps_time_embedding,~gps_data_padding,self.share_input_projection,self.share_output_projection)  
+                gps_embedding,gps_mlm_embedding,gps_traj_rep=self.gps_encoder(gps_data,gps_time_embedding,~gps_data_padding,self.share_input_projection,self.share_output_projection)  
          
                 gps_embedding = self._safe_tensor_operation(gps_embedding, "GPS编码")
                 gps_mlm_embedding=self._safe_tensor_operation(gps_mlm_embedding,"GPS MLM编码")
@@ -317,15 +314,11 @@ class TrajFuse(nn.Module):
             # CDR序列编码 + MLM
             if cdr_data is not None:
 
-                # 创建MLM掩码
-                masked_cdr_data, original_cdr_data, masked_cdr_time_data, original_cdr_time_data, cdr_mask = self._create_mlm_mask(cdr_data, cdr_time_data, "CDR", cdr_data_padding)
-
-
                 # CDR编码 + 时间编码
                 time_positions['cdr']=cdr_time_data
                 cdr_time_embedding = self.time_encoder(cdr_time_data)
 
-                cdr_embedding,cdr_mlm_embedding,cdr_traj_rep=self.cdr_encoder(masked_cdr_data,cdr_time_embedding,~cdr_data_padding,self.share_input_projection,self.share_output_projection)
+                cdr_embedding,cdr_mlm_embedding,cdr_traj_rep=self.cdr_encoder(cdr_data,cdr_time_embedding,~cdr_data_padding,self.share_input_projection,self.share_output_projection)
 
                 cdr_embedding = self._safe_tensor_operation(cdr_embedding, "CDR编码")
                 cdr_mlm_embedding=self._safe_tensor_operation(cdr_mlm_embedding,"CDR MLM编码")
@@ -337,14 +330,11 @@ class TrajFuse(nn.Module):
             # 路段序列编码 + MLM
             if road_seg_data is not None:
 
-                # 创建MLM掩码
-                masked_road_data, original_road_data, masked_road_time_data, original_road_time_data, road_mask = self._create_mlm_mask(road_seg_data, road_time_data, "ROAD_GPS", road_data_padding)
-
                 # 路段编码 + 时间编码
                 time_positions['road_seg']=road_time_data
                 road_time_embedding = self.time_encoder(road_time_data)
 
-                road_seg_embedding,road_seg_mlm_embedding,road_traj_rep=self.road_segment_encoder(masked_road_data,road_time_embedding,~road_data_padding,self.share_input_projection,self.share_output_projection)
+                road_seg_embedding,road_seg_mlm_embedding,road_traj_rep=self.road_segment_encoder(road_seg_data,road_time_embedding,~road_data_padding,self.share_input_projection,self.share_output_projection)
 
                 road_seg_embedding = self._safe_tensor_operation(road_seg_embedding, "路段编码")
                 road_seg_mlm_embedding=self._safe_tensor_operation(road_seg_mlm_embedding,"路段 MLM编码")
@@ -387,12 +377,13 @@ class TrajFuse(nn.Module):
 
             fused_representation,fused_representation_padding_mask = self.modal_fusion(fusion_inputs,fusion_time_embeddings,fusion_padding_mask,fusion_time_positions)
             fused_representation = self._safe_tensor_operation(fused_representation, "模态融合")
+
+            fused_rep = torch.mean(fused_representation, dim=1)
+            contrastive_embeddings['fused_rep'] = fused_rep
             
-            # 3. 最终生成：fused_representation 生成 original_cpath_data
-            final_sequence, final_generation_info = self.final_generator(
-                fused_representation, fused_representation_padding_mask=fused_representation_padding_mask, target=original_cpath_data
-            )
-            final_sequence = self._safe_tensor_operation(final_sequence, "最终序列生成")
+            # 屏蔽生成任务
+            final_sequence = None
+            final_generation_info = None
             
         except Exception as e:
             print(f"推理阶段发生错误: {e}")
@@ -465,8 +456,8 @@ class TrajFuse(nn.Module):
             data[batch_indices_lat, seq_indices_lat, 0] = (data[batch_indices_lat, seq_indices_lat, 0] - min_lat) / range_lat
             data[batch_indices_lon, seq_indices_lon, 1] = (data[batch_indices_lon, seq_indices_lon, 1] - min_lon) / range_lon
             
-            # 最终限制范围到[0, 1]
-            data = torch.clamp(data, min=0.0, max=1.0)
+            # 最终限制范围到[-1, 1]
+            data = torch.clamp(data, min=-1.0, max=1.0)
         
         return data   
     
@@ -495,11 +486,7 @@ class TrajFuse(nn.Module):
             print("修复：时间数据包含NaN或无穷大")
             data = torch.nan_to_num(data.float(), nan=0, posinf=1.0, neginf=0).long()
 
-        # 归一化时间特征
-        #data[:,:,0]=data[:,:,0] / 12  # 月份归一化到[0,1]
-        #data[:,:,1]=data[:,:,1] / 7   # 星期归一化到[0,1]
-        #data[:,:,2]=data[:,:,2] / 24  # 小时归一化到[0,1]
-        #data[:,:,3]=data[:,:,3] / 60  # 分钟归一化到[0,1]
+
         
         # 确保时间在有效范围内
         data = torch.clamp(data, min=-1.0, max=60)
@@ -645,8 +632,7 @@ class TrajFuse(nn.Module):
                 masked_time_data[random_indices[0], random_indices[1], 2] = random_hours
                 masked_time_data[random_indices[0], random_indices[1], 3] = random_minutes
         
-        # 保持原样的掩码位置自动处理（mask_matrix中对应位置为False）
-        #print("最后返回的掩码",mask_matrix[1,:])
+
         return masked_data, original_data, masked_time_data, original_time_data, mask_matrix
     
     def compute_comprehensive_loss_with_generation(self, pred_sequence, target, 
@@ -656,26 +642,31 @@ class TrajFuse(nn.Module):
         device = self.device
         
         try:
-            if pred_sequence.numel() == 0 or target.numel() == 0:
-                return {'total_loss': torch.tensor(5.0, device=device, requires_grad=True)}
+            if pred_sequence is not None:
+                if pred_sequence.numel() == 0 or target.numel() == 0:
+                    return {'total_loss': torch.tensor(5.0, device=device, requires_grad=True)}
+                
+                if torch.isnan(pred_sequence).any() or torch.isinf(pred_sequence).any():
+                    return {'total_loss': torch.tensor(5.0, device=device, requires_grad=True)}
+                
+                # 1. 主要损失：最终生成任务（fused -> original_cpath）
+                target_clamped = torch.clamp(target.long(), min=-1, max=self.road_network_size-1)
+                pred_sequence_clamped = torch.clamp(pred_sequence, min=-10, max=10)
+                
+                pred_flat = pred_sequence_clamped.view(-1, self.road_network_size)
+                target_flat = target_clamped.view(-1)
+                
+                main_loss = F.cross_entropy(
+                    pred_flat, target_flat, 
+                    ignore_index=-1, 
+                    reduction='mean',
+                    label_smoothing=0.1
+                )
+                #main_loss = torch.tensor(0.0, device=device)
+                main_loss = torch.clamp(main_loss, min=1e-4, max=15.0)
+            else:
+                main_loss = torch.tensor(0.0, device=device, requires_grad=True)
             
-            if torch.isnan(pred_sequence).any() or torch.isinf(pred_sequence).any():
-                return {'total_loss': torch.tensor(5.0, device=device, requires_grad=True)}
-            
-            # 1. 主要损失：最终生成任务（fused -> original_cpath）
-            target_clamped = torch.clamp(target.long(), min=-1, max=self.road_network_size-1)
-            pred_sequence_clamped = torch.clamp(pred_sequence, min=-10, max=10)
-            
-            pred_flat = pred_sequence_clamped.view(-1, self.road_network_size)
-            target_flat = target_clamped.view(-1)
-            
-            main_loss = F.cross_entropy(
-                pred_flat, target_flat, 
-                ignore_index=-1, 
-                reduction='mean',
-                label_smoothing=0.1
-            )
-            main_loss = torch.clamp(main_loss, min=1e-4, max=15.0)
             
             # 2. MLM任务损失(已屏蔽)
             mlm_losses = {}
@@ -701,7 +692,10 @@ class TrajFuse(nn.Module):
             total_mlm_loss = total_mlm_loss + time_mlm_loss  # 时间损失平均分配
             
             # 3. 序列级别正则化
-            sequence_reg = self._compute_sequence_regularization(pred_sequence, target)
+            if pred_sequence is not None:
+                sequence_reg = self._compute_sequence_regularization(pred_sequence, target)
+            else:
+                sequence_reg = torch.tensor(0.0, device=device, requires_grad=True)
 
             # 4. 对比学习损失 
             contrastive_loss = torch.tensor(0.0, device=device, requires_grad=True)        
@@ -712,7 +706,7 @@ class TrajFuse(nn.Module):
             logit_scale = 1/self.logit_scale.exp()
    
             
-            # 6. 总损失（主任务+MLM任务+对比学习+序列正则化）
+            # 6. 总损失
             total_loss = (self.main_loss_weight * main_loss + 
                          self.mlm_loss_weight * total_mlm_loss + 
                          self.contrastive_loss_weight * contrastive_loss +
@@ -720,7 +714,7 @@ class TrajFuse(nn.Module):
             
             loss_dict = {
                 'total_loss': total_loss,
-                'main_loss': main_loss.item() if hasattr(main_loss, 'item') else float(main_loss),
+                'main_loss': main_loss.item() if hasattr(main_loss, 'item') else 0.0,
                 'mlm_loss': total_mlm_loss.item() if hasattr(total_mlm_loss, 'item') else 0.0,
                 'contrastive_loss': contrastive_loss.item() if hasattr(contrastive_loss, 'item') else 0.0,
                 'contrastive_temperature': logit_scale,
@@ -755,7 +749,7 @@ class TrajFuse(nn.Module):
             projected_embeddings = []
             for modality_name, embedding in contrastive_embeddings.items():
                 if embedding is not None:
-                    #projected = self.contrastive_projection(embedding)
+                    
                     projected = embedding
                     projected_embeddings.append(projected)
             
@@ -791,7 +785,6 @@ class TrajFuse(nn.Module):
             
 
             if num_pairs > 0:
-                #print(f"对比学习计算了 {num_pairs} 对模态")
                 contrastive_loss = contrastive_loss/ num_pairs 
             else:
                 contrastive_loss = torch.tensor(0.0, device=device, requires_grad=True)
@@ -801,6 +794,7 @@ class TrajFuse(nn.Module):
         except Exception as e:
             print(f"对比学习损失计算错误: {e}")
             return torch.tensor(0.0, device=self.device, requires_grad=True)   
+
 
     def _compute_mlm_loss(self, embeddings, original_data, mask_matrix, data_type):
         """计算MLM损失 - 修复版本"""
